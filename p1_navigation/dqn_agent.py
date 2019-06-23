@@ -1,8 +1,8 @@
 import numpy as np
 import random
-from collections import namedtuple, deque
 
 from model import QNetwork
+from replay_buffer import ReplayBuffer, Experience
 
 import torch
 import torch.nn.functional as F
@@ -16,7 +16,6 @@ LR = 5e-4               # learning rate
 UPDATE_EVERY = 4        # how often to update the network
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-Experience = namedtuple("Experience", field_names=["state", "action", "reward", "next_state", "done"])
 
 class Agent():
     """Interacts with and learns from the environment."""
@@ -44,16 +43,9 @@ class Agent():
         # Initialize time step (for updating every UPDATE_EVERY steps)
         self.t_step = 0
 
-    def step(self, state, action, reward, next_state, done):
-        state = torch.from_numpy(state).float().unsqueeze(0).to(device)
-        self.qnetwork_local.eval()
-        with torch.no_grad():
-            action_values = self.qnetwork_local(state)
-        self.qnetwork_local.train()
-        target = action_values.cpu().data.numpy()
-        error = abs(reward - target[0][action])
-        print('TD error', error)
-        self.memory.add(error, Experience(state, action, reward, next_state, done))
+    def step(self, experience):
+        error = self._get_temporal_difference_error(experience)
+        self.memory.add(error, experience)
 
         # Learn every UPDATE_EVERY time steps.
         self.t_step = (self.t_step + 1) % UPDATE_EVERY
@@ -63,6 +55,30 @@ class Agent():
                 experiences = self.memory.sample()
                 self.learn(experiences, GAMMA)
 
+    def _get_temporal_difference_error(self, experience):
+        local_action_values = self._get_actions_from_state(self.qnetwork_local, experience.state)
+        local_action_values = local_action_values.cpu().data
+        old_value = local_action_values[0][experience.action]
+
+        target_action_values = self._get_actions_from_state(self.qnetwork_target, experience.next_state)
+        target_action_values = target_action_values.cpu().data
+        if experience.done:
+            local_action_values[0][experience.action] = experience.reward
+        else:
+            local_action_values[0][experience.action] = experience.reward + GAMMA * torch.max(target_action_values)
+
+        return abs(old_value - local_action_values[0][experience.action])
+
+    def _get_actions_from_state(self, network, state):
+        """ feed state through network to get action values. ensure model is
+        left in training mode after the evaluation """
+        state = torch.from_numpy(state).float().unsqueeze(0).to(device)
+        network.eval()
+        with torch.no_grad():
+            action_values = network(state)
+        network.train()
+        return action_values
+
     def act(self, state, eps=0.):
         """Returns actions for given state as per current policy.
 
@@ -71,11 +87,7 @@ class Agent():
             state (array_like): current state
             eps (float): epsilon, for epsilon-greedy action selection
         """
-        state = torch.from_numpy(state).float().unsqueeze(0).to(device)
-        self.qnetwork_local.eval()
-        with torch.no_grad():
-            action_values = self.qnetwork_local(state)
-        self.qnetwork_local.train()
+        action_values = self._get_actions_from_state(self.qnetwork_local, state)
 
         # Epsilon-greedy action selection
         if random.random() > eps:
@@ -125,40 +137,3 @@ class Agent():
             target_param.data.copy_(tau*local_param.data + (1.0-tau)*target_param.data)
 
 
-class ReplayBuffer:
-    """Fixed-size buffer to store experience tuples."""
-
-    def __init__(self, action_size, buffer_size, batch_size, seed):
-        """Initialize a ReplayBuffer object.
-
-        Params
-        ======
-            action_size (int): dimension of each action
-            buffer_size (int): maximum size of buffer
-            batch_size (int): size of each training batch
-            seed (int): random seed
-        """
-        self.action_size = action_size
-        self.memory = deque(maxlen=buffer_size)
-        self.batch_size = batch_size
-        self.seed = random.seed(seed)
-
-    def add(self, error, experience):
-        """Add a new experience to memory."""
-        self.memory.append(experience)
-
-    def sample(self):
-        """Randomly sample a batch of experiences from memory."""
-        experiences = random.sample(self.memory, k=self.batch_size)
-
-        states = torch.from_numpy(np.vstack([e.state for e in experiences if e is not None])).float().to(device)
-        actions = torch.from_numpy(np.vstack([e.action for e in experiences if e is not None])).long().to(device)
-        rewards = torch.from_numpy(np.vstack([e.reward for e in experiences if e is not None])).float().to(device)
-        next_states = torch.from_numpy(np.vstack([e.next_state for e in experiences if e is not None])).float().to(device)
-        dones = torch.from_numpy(np.vstack([e.done for e in experiences if e is not None]).astype(np.uint8)).float().to(device)
-
-        return (states, actions, rewards, next_states, dones)
-
-    def __len__(self):
-        """Return the current size of internal memory."""
-        return len(self.memory)
