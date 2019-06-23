@@ -102,3 +102,9 @@ ENV/
 
 # mypy
 .mypy_cache/
+
+# vim
+*swp
+
+# unity environments
+*.app
